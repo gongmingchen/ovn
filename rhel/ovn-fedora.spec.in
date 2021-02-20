@@ -455,6 +455,7 @@ fi
 %{_bindir}/ovn-sbctl
 %{_bindir}/ovn-trace
 %{_bindir}/ovn-detrace
+%{_bindir}/ovn-match-ip
 %{_bindir}/ovn-appctl
 %{_bindir}/ovn-ic-nbctl
 %{_bindir}/ovn-ic-sbctl

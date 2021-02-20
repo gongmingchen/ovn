@@ -227,10 +227,19 @@ create_addr_sets(struct shash *addr_sets)
     };
     static const char *const addrs4[] = { NULL };
 
+    static const char *addrs5[253];
+    static char addrs5_[253][20];
+    for (int i = 0, ip_num = 2; i < 253; i++, ip_num++) {
+        sprintf(addrs5_[i], "1.1.1.%d", ip_num);
+        addrs5[i]=addrs5_[i];
+    }
+
     expr_const_sets_add(addr_sets, "set1", addrs1, 3, true);
     expr_const_sets_add(addr_sets, "set2", addrs2, 3, true);
     expr_const_sets_add(addr_sets, "set3", addrs3, 3, true);
     expr_const_sets_add(addr_sets, "set4", addrs4, 0, true);
+    expr_const_sets_add(addr_sets, "set5", (const char *const *)addrs5,
+                        253, true);
 }
 
 static void

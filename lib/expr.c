@@ -1060,6 +1060,200 @@ expr_constant_set_destroy(struct expr_constant_set *cs)
     }
 }
 
+struct ip_in
+{
+    uint32_t *ip;
+    size_t size;
+};
+
+struct ip_out_entry
+{
+    uint32_t ip;
+    uint32_t mask;
+    bool masked;
+};
+
+struct ip_out
+{
+    struct ip_out_entry *entries;
+    size_t used;
+    size_t size;
+};
+
+static int
+compare_mask_ip(const void *a, const void *b)
+{
+    uint32_t a_ = *(uint32_t *)a;
+    uint32_t b_ = *(uint32_t *)b;
+
+    return a_ < b_ ? -1 : a_ > b_;
+}
+
+/* Function to check ip return data and xrealloc. */
+static void
+check_realloc_ip_out(struct ip_out *ip_out_data){
+    if (ip_out_data->used >= ip_out_data->size) {
+        ip_out_data->entries = x2nrealloc(ip_out_data->entries,
+                                    &ip_out_data->size,
+                                    sizeof *ip_out_data->entries);
+    }
+}
+
+/* Simple description of the algorithm.
+ * There are two situations
+ * 1. Combine once
+ * such as:
+ *     1.1.1.0 1.1.1.1 1.0.1.0 1.0.1.1
+ *     Combined into: 1.1.1.0/31, 1.0.1.0/31
+ * 2. Combine multiple times
+ *     1.1.1.0 1.1.1.1 1.0.1.0 1.0.1.1
+ *     Combined into: 1.0.1.0/255.254.255.254
+ *
+ * Considering the actual scene and simplicity, the first case is used to
+ * combine once.
+ *
+ * ...00...
+ * ...01...
+ * ...10...
+ * ...11...
+ * "..." means the same value omitted.
+ * Obviously, the above value can be expressed as ...00.../11100111. This
+ * continuous interval that can be represented by one or several wildcard
+ * masks is called a segment.
+ * Only if all 2<<n values from the minimum value 00...(n) to 11...(n)
+ * exist, can they be combined into 00...(n)/00...( n)
+ *
+ * First sort all the values by size. Iterate through each value.
+ * 1. Find a new segment, where two values differ only by 1 bit, such as
+ * ...0... and ...1...
+ *     diff = ip_next ^ ip
+ *     if (diff & (diff-1)) == 0
+ *         new_segment = true
+ * The first non-zero place in the high direction of ip is the end of the
+ * segment(segment_end).
+ * For example...100... and...101..., the segment_end is ...111...
+ *
+ * 2. Count the number of consecutive and less than continuous_size in the
+ * segment.
+ *     diff = ip_next - ip
+ *     if (diff & (diff-1)) == 0 && ip_next <= segment_end
+ *         continuous_size++
+ *
+ * 3. Combine different ip intervals in the segment according to
+ * continuous_size.
+ * In continuous_size, from the highest bit of 1 to the lowest bit of 1, in
+ * the order of segment start, each bit that is 1 is a different ip interval
+ * that can be combined with a wildcard mask.
+ * For example, 000, 001, 010:
+ *     continuous_size: 3 (binary 11), segment_start: 000
+ *     mask: ~(1 << 1 - 1) = 110; ~(1 << 0 - 1) = 111;
+ *     Combined to: 000/110, 010/111
+ *
+ * 4. The ip that cannot be recorded in a segment will not be combined. */
+static void
+combine_ipv4_in_mask(struct ip_in *ip_in_data, struct ip_out *ip_out_data){
+    bool recording = false;
+    uint32_t i, diff, connect, start, end, continuous_size, mask_base;
+
+    start = 0;
+    continuous_size = 0;
+    mask_base = 0;
+    end = 0;
+
+    qsort(ip_in_data->ip, ip_in_data->size, sizeof(uint32_t),
+          compare_mask_ip);
+    memset(ip_out_data, 0, sizeof(struct ip_out));
+
+    for (i = 0; i < ip_in_data->size; i++) {
+        if (i + 1 >= ip_in_data->size) {
+            if (!recording) {
+                goto end_when_not_recording;
+            } else {
+                goto end_when_recording;
+            }
+        }
+        /* Not recording in a segment.
+         * Record a new segment or not combine. */
+        if (!recording) {
+            connect = ip_in_data->ip[i + 1] ^ ip_in_data->ip[i];
+            /* Only one bit different. */
+            if ((connect & (connect - 1)) == 0) {
+                recording = true;
+                start = ip_in_data->ip[i];
+                continuous_size = 2;
+                mask_base = connect;
+
+                int j = 0;
+                end = start;
+                /* The first non-zero place in the high direction is
+                 * the end of the segment. */
+                while (j < 32 && ((start & (mask_base << j)) == 0)) {
+                    end |= (mask_base << j);
+                    j++;
+                }
+
+                continue;
+            /* Different segments and different bit, dnot combine. */
+            } else {
+end_when_not_recording:
+                check_realloc_ip_out(ip_out_data);
+
+                ip_out_data->entries[ip_out_data->used].ip =
+                    ip_in_data->ip[i];
+                ip_out_data->entries[ip_out_data->used].masked = false;
+                ip_out_data->used++;
+
+                continue;
+            }
+        /* Recording in the current segment. */
+        } else {
+            diff = ip_in_data->ip[i + 1] - ip_in_data->ip[i];
+            /* Ignore equal node. */
+            if (diff == 0) {
+                continue;
+            }
+            /* Stop recording and combine, or continue recording. */
+            if (((diff & (diff - 1)) != 0)
+                || (ip_in_data->ip[i + 1] > end)) {
+end_when_recording:
+                recording = false;
+                while (continuous_size) {
+                    check_realloc_ip_out(ip_out_data);
+
+                    int segment_power, pow_base;
+                    if (continuous_size == 0) {
+                        segment_power = 0;
+                    } else {
+                        segment_power = 31 - clz32(continuous_size);
+                    }
+
+                    if (mask_base == 0) {
+                        pow_base = 0;
+                    } else {
+                        pow_base = 31 - clz32(mask_base);
+                    }
+
+                    ip_out_data->entries[ip_out_data->used].mask =
+                        ~(((1 << segment_power) - 1) << pow_base);
+                    ip_out_data->entries[ip_out_data->used].ip =
+                        ip_out_data->entries[ip_out_data->used].mask
+                        & start;
+                    ip_out_data->entries[ip_out_data->used].masked = true;
+                    ip_out_data->used++;
+
+                    continuous_size &= (~(1 << segment_power));
+                    start = ip_out_data->entries[ip_out_data->used - 1].ip
+                            + (1 << (segment_power + pow_base));
+                }
+            } else {
+                continuous_size++;
+            }
+
+            continue;
+        }
+    }
+}
+
 /* Adds an constant set named 'name' to 'const_sets', replacing any existing
  * constant set entry with the given name. */
 void
@@ -1074,6 +1268,11 @@ expr_const_sets_add(struct shash *const_sets, const char *name,
     cs->in_curlies = true;
     cs->n_values = 0;
     cs->values = xmalloc(n_values * sizeof *cs->values);
+    struct ip_out ip_out_data;
+    struct ip_in ip_in_data;
+    ip_in_data.ip = xmalloc(n_values * sizeof(uint32_t));
+    ip_in_data.size = 0;
+
     if (convert_to_integer) {
         cs->type = EXPR_C_INTEGER;
         for (size_t i = 0; i < n_values; i++) {
@@ -1086,6 +1285,9 @@ expr_const_sets_add(struct shash *const_sets, const char *name,
                 && lex.token.type != LEX_T_MASKED_INTEGER) {
                 VLOG_WARN("Invalid constant set entry: '%s', token type: %d",
                           values[i], lex.token.type);
+            } else if (lex.token.type == LEX_T_INTEGER
+                       && lex.token.format == LEX_F_IPV4) {
+                ip_in_data.ip[ip_in_data.size++] = ntohl(lex.token.value.ipv4);
             } else {
                 union expr_constant *c = &cs->values[cs->n_values++];
                 c->value = lex.token.value;
@@ -1105,6 +1307,23 @@ expr_const_sets_add(struct shash *const_sets, const char *name,
         }
     }
 
+    if (ip_in_data.size > 0) {
+        combine_ipv4_in_mask(&ip_in_data, &ip_out_data);
+        for (size_t i = 0; i < ip_out_data.used; ++i) {
+            union expr_constant *c = &cs->values[cs->n_values++];
+            memset(&c->value, 0, sizeof c->value);
+            memset(&c->mask, 0, sizeof c->mask);
+            c->value.ipv4 = htonl(ip_out_data.entries[i].ip);
+            c->format = LEX_F_IPV4;
+            c->masked = ip_out_data.entries[i].masked;
+            if (c->masked) {
+                c->mask.ipv4 = htonl(ip_out_data.entries[i].mask);
+            }
+        }
+        free(ip_out_data.entries);
+    }
+
+    free(ip_in_data.ip);
     shash_add(const_sets, name, cs);
 }
 

@@ -21,7 +21,8 @@ MAN_ROOTS += \
 bin_SCRIPTS += \
     utilities/ovn-docker-overlay-driver \
     utilities/ovn-docker-underlay-driver \
-    utilities/ovn-detrace
+    utilities/ovn-detrace \
+    utilities/ovn-match-ip
 
 EXTRA_DIST += \
     utilities/ovn-ctl \
@@ -35,6 +36,7 @@ EXTRA_DIST += \
     utilities/ovn-appctl.8.xml \
     utilities/ovn-trace.8.xml \
     utilities/ovn-detrace.in \
+    utilities/ovn-match-ip.in \
     utilities/ovndb-servers.ocf \
     utilities/checkpatch.py \
     utilities/docker/Makefile \
@@ -60,6 +62,7 @@ CLEANFILES += \
     utilities/ovn-trace.8 \
     utilities/ovn-detrace.1 \
     utilities/ovn-detrace \
+    utilities/ovn-match-ip \
     utilities/ovn-appctl.8 \
     utilities/ovn-appctl \
     utilities/ovn-sim
